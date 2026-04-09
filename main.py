@@ -1,6 +1,6 @@
 import cv2
 import numpy as np
-from tensorflow.keras.models import load_model
+import onnxruntime as ort
 from flask import Flask, render_template
 from flask_socketio import SocketIO, emit
 import base64
@@ -11,9 +11,9 @@ app = Flask(__name__)
 
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
 
-
-model = load_model('fer2013_mini_XCEPTION.hdf5', compile=False)
-
+# loading up our lightweight ONNX emotion model
+ort_session = ort.InferenceSession("fer2013_mini_XCEPTION.onnx")
+input_name = ort_session.get_inputs()[0].name
 emotion_labels = ['Angry', 'Disgust', 'Fear', 'Happy', 'Sad', 'Surprise', 'Neutral']
 
 
@@ -78,10 +78,10 @@ def handle_image(data):
                 batch = np.vstack([
                     np.reshape(face, (1, 48, 48, 1)),
                     np.reshape(face_flipped, (1, 48, 48, 1))
-                ])
+                ]).astype(np.float32)
 
-              
-                predictions = model.predict(batch, verbose=0)
+                # Get the AI guess using blazing-fast ONNX
+                predictions = ort_session.run(None, {input_name: batch})[0]
                 
                 
                 final_pred = np.mean(predictions, axis=0)
