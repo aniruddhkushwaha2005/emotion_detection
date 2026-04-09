@@ -1,0 +1,7 @@
+Flask==3.0.0
+Flask-SocketIO==5.3.6
+tensorflow==2.15.0
+opencv-python==4.8.1.78
+numpy<2.0.0
+gunicorn==21.2.0
+eventlet==0.33.3

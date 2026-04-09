@@ -4,18 +4,22 @@ from tensorflow.keras.models import load_model
 from flask import Flask, render_template
 from flask_socketio import SocketIO, emit
 import base64
+from collections import deque
 
 app = Flask(__name__)
-# Enable CORS for socket communication to support mobile devices
-socketio = SocketIO(app, cors_allowed_origins="*")
 
-# Load pretrained model
+# set up socketio to send and receive video frames instantly
+socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
+
+# loading up our pre-trained emotion detection model
 model = load_model('fer2013_mini_XCEPTION.hdf5', compile=False)
 
-# Emotion labels
 emotion_labels = ['Angry', 'Disgust', 'Fear', 'Happy', 'Sad', 'Surprise', 'Neutral']
 
-# OpenCV Fast Face Detector
+# queue to store recent predictions so the emotion text doesn't flicker on screen
+recent_emotions = deque(maxlen=6)
+
+# the simple opencv face detector
 face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
 
 @app.route('/')
@@ -24,22 +28,18 @@ def index():
 
 @socketio.on('process_image')
 def handle_image(data):
-    """
-    Receives base64 image from the mobile/desktop browser,
-    runs facial detection, and emits back coordinate sizes and stats.
-    """
+    # take the image from the browser, find the face, and predict the emotion
     try:
+        # decode the base64 image string sent by javascript
         header, encoded = data.split(",", 1)
         decoded = base64.b64decode(encoded)
         img_np = np.frombuffer(decoded, dtype=np.uint8)
         frame = cv2.imdecode(img_np, flags=cv2.IMREAD_COLOR)
-        
-        # No flip needed - front camera captures correctly, 
-        # and CSS handles mirroring locally!
 
+        # change to black and white for the AI
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         
-        # Downscale logic isn't needed here if the client sends a small canvas (e.g. 640x480)
+        # detect faces
         faces = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30))
         
         response_data = {
@@ -55,32 +55,53 @@ def handle_image(data):
         dominant_emotion = "No Face Detected" if len(faces) == 0 else "Scanning..."
         
         for (x, y, w, h) in faces:
-            # Expand bounding box
-            offset_x, offset_y = int(w * 0.1), int(h * 0.1)
-            hx = max(0, x - offset_x)
-            hy = max(0, y - offset_y)
-            hw = min(gray.shape[1] - hx, w + offset_x * 2)
-            hh = min(gray.shape[0] - hy, h + offset_y * 2)
-
-            face_roi = gray[hy:hy+hh, hx:hx+hw]
+            # crop out the exact face area
+            face_roi = gray[y:y+h, x:x+w]
             
             emotion_str = "Unknown"
             conf_val = 0.0
             
+            # make sure the crop is big enough
             if face_roi.shape[0] >= 48 and face_roi.shape[1] >= 48:
+                
+                # fix lighting/contrast in case the room is dark
+                face_roi = cv2.equalizeHist(face_roi)
+                
+                # resize to match what the model expects
                 face = cv2.resize(face_roi, (48, 48))
                 face = face / 255.0
-                face = np.reshape(face, (1, 48, 48, 1))
+                
+                # little trick: check both the normal face and a mirrored version of it
+                # this gives us much more accurate answers
+                face_flipped = cv2.flip(face, 1)
+                
+                # pack them together to predict at the same time
+                batch = np.vstack([
+                    np.reshape(face, (1, 48, 48, 1)),
+                    np.reshape(face_flipped, (1, 48, 48, 1))
+                ])
 
-                prediction = model.predict(face, verbose=0)
-                max_idx = np.argmax(prediction)
+                # get the AI's guess
+                predictions = model.predict(batch, verbose=0)
+                
+                # average out the results to make sure it's right
+                final_pred = np.mean(predictions, axis=0)
+                
+                # average across the last few frames to stop the text from flickering
+                global recent_emotions
+                recent_emotions.append(final_pred)
+                avg_pred = np.mean(recent_emotions, axis=0)
+                
+                # find the emotion with the highest score
+                max_idx = np.argmax(avg_pred)
                 emotion_str = emotion_labels[max_idx]
-                conf_val = float(prediction[0][max_idx])
+                conf_val = float(avg_pred[max_idx])
                 
                 if conf_val > max_confidence:
                     max_confidence = conf_val
                     dominant_emotion = emotion_str
                     
+            # save the box info so the frontend knows where to draw
             response_data["faces"].append({
                 "x": int(x),
                 "y": int(y),
@@ -92,12 +113,11 @@ def handle_image(data):
         response_data["stats"]["emotion"] = dominant_emotion
         response_data["stats"]["confidence"] = max_confidence
         
-        # Emit detection results instantly back to the sender
+        # send the data back to javascript instantly
         emit('result', response_data)
         
     except Exception as e:
         print("Image processing error:", e)
 
 if __name__ == '__main__':
-    # Using 'adhoc' SSL context generates an on-the-fly 'https://' cert so Mobile Chrome allows webcam access.
-    socketio.run(app, host='0.0.0.0', port=5000, debug=True, ssl_context='adhoc')
+    socketio.run(app, host='0.0.0.0', port=5000, debug=True)

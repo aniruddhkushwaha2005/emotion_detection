@@ -30,7 +30,7 @@
             <div class="video-container glass">
                 <div class="video-wrapper">
                     <!-- Native HTML5 Video Feed -->
-                    <video id="videoElement" autoplay playsinline></video>
+                    <video id="videoElement" autoplay playsinline muted></video>
                     <!-- HUD Scan Graphics Layer -->
                     <canvas id="overlayCanvas"></canvas>
                     
@@ -167,7 +167,13 @@
                 ctxOverlay.strokeStyle = color;
                 ctxOverlay.fillStyle = color;
                 
-                let { x, y, w, h } = face;
+                // Mirror X coordinate mathematically so the HUD box stays aligned with the mirrored video
+                // This allows the text to be printed normally while the box stays locked on the face!
+                let orig_x = face.x;
+                let y = face.y;
+                let w = face.w;
+                let h = face.h;
+                let x = overlay.width - orig_x - w;
 
                 // TL
                 ctxOverlay.beginPath(); ctxOverlay.moveTo(x, y+len); ctxOverlay.lineTo(x, y); ctxOverlay.lineTo(x+len, y); ctxOverlay.stroke();
